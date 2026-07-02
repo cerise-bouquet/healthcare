@@ -1,17 +1,134 @@
+import { db } from "@/lib/db";
 import { ApiError } from "@/lib/errors";
 import { isStepKey, stepSchemas } from "@/lib/validation";
 import type { PatchStepInput, SubmitAssessmentInput } from "./types";
+import { calculateFullResult } from "@/modules/results/service";
+import type { PrismaClient } from "@prisma/client";
+
+// ---- 内部辅助 ----
+
+/** 事务客户端类型 */
+type Tx = Omit<
+  PrismaClient,
+  "$connect" | "$disconnect" | "$on" | "$transaction" | "$use" | "$extends"
+>;
+
+/** 通过外部 sessionId 查找 User 及其最新的 AssessmentSession */
+async function lookupSession(sessionId: string) {
+  const user = await db.user.findUnique({
+    where: { sessionId },
+    include: {
+      sessions: {
+        orderBy: { createdAt: "desc" },
+        take: 1,
+        include: { answers: true, result: true }
+      }
+    }
+  });
+
+  if (!user) {
+    throw new ApiError("SESSION_NOT_FOUND", `Session ${sessionId} not found.`, 404);
+  }
+
+  const session = user.sessions[0];
+  if (!session) {
+    throw new ApiError("INTERNAL_ERROR", "User has no assessment session.", 500);
+  }
+
+  return { user, session };
+}
+
+/** 判断指定步骤是否已完成（其字段已存在于 answers 中） */
+function isStepComplete(
+  stepKey: string,
+  answers: Record<string, unknown>
+): boolean {
+  const schema = stepSchemas[stepKey as keyof typeof stepSchemas];
+  if (!schema) return false;
+
+  const shape = schema.shape as Record<string, unknown>;
+  const requiredKeys = Object.keys(shape).filter(
+    (k) => !(shape[k] as { isOptional?: () => boolean }).isOptional?.()
+  );
+
+  // 对于 review 步骤，只需检查前置步骤是否全部完成
+  if (stepKey === "review") return true;
+
+  return requiredKeys.every((key) => answers[key] !== undefined && answers[key] !== null);
+}
+
+/** 根据已有答案计算可以推进到哪个步骤 */
+function determineNextStep(
+  currentStep: string,
+  completedSteps: string[],
+  answers: Record<string, unknown>
+): { nextStep: string; newCompleted: string[] } {
+  const stepOrder = ["profile", "goal", "body", "activity", "review"];
+
+  // 更新 completedSteps
+  const newCompleted = new Set(completedSteps);
+
+  // 检查当前步骤是否完成
+  if (isStepComplete(currentStep, answers)) {
+    newCompleted.add(currentStep);
+  }
+
+  // 找到下一个未完成的步骤
+  let nextStep = currentStep;
+  for (const step of stepOrder) {
+    if (!newCompleted.has(step)) {
+      nextStep = step;
+      break;
+    }
+  }
+
+  // 如果所有步骤都完成了，currentStep 保持在最后一个完成步骤
+  if (Array.from(newCompleted).length >= stepOrder.length) {
+    nextStep = "review";
+  }
+
+  return {
+    nextStep,
+    newCompleted: Array.from(newCompleted)
+  };
+}
+
+/** 检查是否所有步骤都已完成（用于 submit 校验） */
+function allStepsCompleted(completedSteps: string[]): boolean {
+  const required = ["profile", "goal", "body", "activity", "review"];
+  return required.every((s) => completedSteps.includes(s));
+}
+
+/** 将答案字典合并写入 AssessmentAnswer 模型字段 */
+function buildAnswerData(
+  sessionId: string,
+  answers: Record<string, unknown>
+): Record<string, unknown> {
+  const data: Record<string, unknown> = { sessionId };
+  if ("gender" in answers) data.gender = answers.gender;
+  if ("goal" in answers) data.goal = answers.goal;
+  if ("age" in answers) data.age = answers.age;
+  if ("heightCm" in answers) data.heightCm = answers.heightCm;
+  if ("weightKg" in answers) data.weightKg = answers.weightKg;
+  if ("targetWeightKg" in answers) data.targetWeightKg = answers.targetWeightKg;
+  if ("activityLevel" in answers) data.activityLevel = answers.activityLevel;
+  return data;
+}
+
+// ---- 导出的服务函数 ----
 
 export async function getProgress(sessionId: string) {
-  // TODO(next developer): load session, validate ownership boundary, and return
-  // draft progress without protected result fields.
+  const { session } = await lookupSession(sessionId);
+
   return {
     sessionId,
-    status: "DRAFT",
-    currentStep: "profile",
-    completedSteps: [],
-    answers: {},
-    version: 1
+    status: session.status,
+    currentStep: session.currentStep,
+    completedSteps: session.completedSteps,
+    answers: session.answers
+      ? serializeAnswersForProgress(session.answers)
+      : {},
+    version: session.version
   };
 }
 
@@ -19,33 +136,251 @@ export async function patchStep(input: PatchStepInput) {
   if (!isStepKey(input.stepKey)) {
     throw new ApiError("VALIDATION_ERROR", "Unknown assessment step.", 400);
   }
-  stepSchemas[input.stepKey].strict().parse(input.answers);
-  // TODO(next developer): implement transaction:
-  // read session -> check version -> upsert answers -> advance state -> version++.
-  return {
-    status: "DRAFT",
-    currentStep: input.stepKey,
-    completedSteps: [],
-    version: input.version + 1
-  };
+
+  // Zod 校验答案字段
+  const parsed = stepSchemas[input.stepKey].strict().parse(input.answers);
+
+  // 在事务中执行：读取 → 版本校验 → 更新答案 → 推进状态 → 版本号+1
+  const result = await db.$transaction(async (tx: Tx) => {
+    const user = await tx.user.findUnique({
+      where: { sessionId: input.sessionId },
+      include: {
+        sessions: {
+          orderBy: { createdAt: "desc" },
+          take: 1,
+          include: { answers: true }
+        }
+      }
+    });
+
+    if (!user) {
+      throw new ApiError("SESSION_NOT_FOUND", `Session ${input.sessionId} not found.`, 404);
+    }
+
+    const session = user.sessions[0];
+    if (!session) {
+      throw new ApiError("INTERNAL_ERROR", "User has no assessment session.", 500);
+    }
+
+    // 版本校验
+    if (session.version !== input.version) {
+      throw new ApiError(
+        "VERSION_CONFLICT",
+        `Expected version ${session.version}, got ${input.version}.`,
+        409
+      );
+    }
+
+    // 已提交后不允许修改
+    if (session.status === "SUBMITTED") {
+      throw new ApiError(
+        "ALREADY_SUBMITTED",
+        "Cannot modify answers after submission.",
+        409
+      );
+    }
+
+    // 合并已有答案与新答案
+    const existingAnswers = session.answers
+      ? serializeAnswersForProgress(session.answers)
+      : {};
+    const mergedAnswers = { ...existingAnswers, ...parsed };
+
+    // 更新或创建答案
+    const answerData = buildAnswerData(session.id, mergedAnswers);
+    const existingAnswer = await tx.assessmentAnswer.findUnique({
+      where: { sessionId: session.id }
+    });
+    if (existingAnswer) {
+      await tx.assessmentAnswer.update({
+        where: { sessionId: session.id },
+        data: answerData
+      });
+    } else {
+      await tx.assessmentAnswer.create({
+        data: answerData as never
+      });
+    }
+
+    // 计算步骤推进
+    const { nextStep, newCompleted } = determineNextStep(
+      input.stepKey,
+      session.completedSteps,
+      mergedAnswers
+    );
+
+    const newStatus = allStepsCompleted(newCompleted) ? "READY_TO_SUBMIT" : "DRAFT";
+    const newVersion = session.version + 1;
+
+    // 更新 session
+    await tx.assessmentSession.update({
+      where: { id: session.id },
+      data: {
+        currentStep: nextStep,
+        completedSteps: newCompleted,
+        version: newVersion,
+        status: newStatus
+      }
+    });
+
+    return {
+      status: newStatus,
+      currentStep: nextStep,
+      completedSteps: newCompleted,
+      version: newVersion
+    };
+  });
+
+  return result;
 }
 
 export async function submitAssessment(input: SubmitAssessmentInput) {
-  // TODO(next developer): implement idempotent submit transaction and delegate
-  // calculation to results module.
+  const { sessionId, version, idempotencyKey } = input;
+
+  return await db.$transaction(async (tx: Tx) => {
+    const user = await tx.user.findUnique({
+      where: { sessionId },
+      include: {
+        sessions: {
+          orderBy: { createdAt: "desc" },
+          take: 1,
+          include: { answers: true, result: true }
+        }
+      }
+    });
+
+    if (!user) {
+      throw new ApiError("SESSION_NOT_FOUND", `Session ${sessionId} not found.`, 404);
+    }
+
+    const session = user.sessions[0];
+    if (!session) {
+      throw new ApiError("INTERNAL_ERROR", "User has no assessment session.", 500);
+    }
+
+    // 已提交：幂等返回已有结果
+    if (session.status === "SUBMITTED" && session.result) {
+      return buildSubmitResponse(sessionId, session.result, user.sessionId);
+    }
+
+    // 版本校验
+    if (session.version !== version) {
+      throw new ApiError(
+        "VERSION_CONFLICT",
+        `Expected version ${session.version}, got ${version}.`,
+        409
+      );
+    }
+
+    // 完整性校验
+    if (!allStepsCompleted(session.completedSteps)) {
+      throw new ApiError(
+        "INCOMPLETE_ASSESSMENT",
+        "All assessment steps must be completed before submission.",
+        422
+      );
+    }
+
+    if (!session.answers) {
+      throw new ApiError(
+        "INCOMPLETE_ASSESSMENT",
+        "No answers found for this session.",
+        422
+      );
+    }
+
+    // 收集所有答案
+    const answers = serializeAnswersForProgress(session.answers);
+
+    // 计算结果
+    const fullResult = calculateFullResult(answers);
+
+    // 写入结果
+    const resultRecord = await tx.assessmentResult.create({
+      data: {
+        sessionId: session.id,
+        bmi: fullResult.bmi,
+        bmiCategory: fullResult.bmiCategory,
+        calorieTarget: fullResult.calorieTarget ?? null,
+        predictedTargetDate: fullResult.predictedTargetDate
+          ? new Date(fullResult.predictedTargetDate)
+          : null,
+        publicPayload: fullResult.publicPayload as never,
+        protectedPayload: fullResult.protectedPayload as never,
+        algorithmVersion: fullResult.algorithmVersion
+      }
+    });
+
+    // 更新 session 状态
+    await tx.assessmentSession.update({
+      where: { id: session.id },
+      data: {
+        status: "SUBMITTED",
+        submittedAt: new Date(),
+        version: session.version + 1
+      }
+    });
+
+    return buildSubmitResponse(sessionId, resultRecord, user.sessionId);
+  });
+}
+
+// ---- 响应构建 ----
+
+function buildSubmitResponse(
+  sessionId: string,
+  result: {
+    bmi: unknown;
+    bmiCategory: string;
+    id: string;
+    publicPayload: unknown;
+    protectedPayload: unknown;
+  },
+  _userSessionId: string
+) {
+  const pub = result.publicPayload as Record<string, unknown>;
   return {
-    sessionId: input.sessionId,
-    status: "SUBMITTED",
-    resultId: "res_contract_stub",
+    sessionId,
+    status: "SUBMITTED" as const,
+    resultId: result.id,
     publicResult: {
-      bmi: 24.1,
-      bmiCategory: "NORMAL",
-      summary: "Your current metrics are within a manageable range.",
-      nextAction: "Unlock full plan to view target date and detailed daily guidance."
+      bmi: pub.bmi ?? Number(result.bmi),
+      bmiCategory: pub.bmiCategory ?? result.bmiCategory,
+      summary: pub.summary ?? "",
+      nextAction: pub.nextAction ?? "Unlock full plan to view target date and detailed daily guidance."
     },
     paywall: {
       required: true,
       reason: "FULL_RESULT_REQUIRES_SUBSCRIPTION"
     }
   };
+}
+
+function serializeAnswersForProgress(
+  answer: {
+    gender: string | null;
+    goal: string | null;
+    age: number | null;
+    heightCm: unknown;
+    weightKg: unknown;
+    targetWeightKg: unknown;
+    activityLevel: string | null;
+    extraAnswers: unknown;
+  }
+): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+  if (answer.gender !== null) result.gender = answer.gender;
+  if (answer.goal !== null) result.goal = answer.goal;
+  if (answer.age !== null) result.age = answer.age;
+  if (answer.heightCm !== null) result.heightCm = Number(answer.heightCm);
+  if (answer.weightKg !== null) result.weightKg = Number(answer.weightKg);
+  if (answer.targetWeightKg !== null) result.targetWeightKg = Number(answer.targetWeightKg);
+  if (answer.activityLevel !== null) result.activityLevel = answer.activityLevel;
+  if (answer.extraAnswers !== null && typeof answer.extraAnswers === "object") {
+    const extra = answer.extraAnswers as Record<string, unknown>;
+    if (Object.keys(extra).length > 0) {
+      result.extraAnswers = extra;
+    }
+  }
+  return result;
 }

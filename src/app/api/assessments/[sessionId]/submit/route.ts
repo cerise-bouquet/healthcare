@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { submitAssessment } from "@/modules/assessments/service";
 import { idempotencyKeySchema, versionSchema } from "@/lib/validation";
+import { withErrorHandler } from "@/lib/api-utils";
 
 const requestSchema = z.object({
   version: versionSchema,
@@ -12,12 +13,15 @@ interface Params {
   params: { sessionId: string };
 }
 
-export async function POST(request: Request, { params }: Params) {
-  const input = requestSchema.parse(await request.json());
-  const body = await submitAssessment({
-    sessionId: params.sessionId,
-    version: input.version,
-    idempotencyKey: input.idempotencyKey
+export async function POST(request: Request, { params }: Params): Promise<NextResponse> {
+  return withErrorHandler(async () => {
+    const raw = await request.json();
+    const input = requestSchema.parse(raw);
+    const body = await submitAssessment({
+      sessionId: params.sessionId,
+      version: input.version,
+      idempotencyKey: input.idempotencyKey
+    });
+    return { body };
   });
-  return NextResponse.json(body);
 }

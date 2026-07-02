@@ -1,7 +1,9 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { patchStep } from "@/modules/assessments/service";
-import { versionSchema } from "@/lib/validation";
+import { versionSchema, isStepKey } from "@/lib/validation";
+import { withErrorHandler } from "@/lib/api-utils";
+import { ApiError } from "@/lib/errors";
 
 const requestSchema = z.object({
   version: versionSchema,
@@ -12,13 +14,21 @@ interface Params {
   params: { sessionId: string; stepKey: string };
 }
 
-export async function PATCH(request: Request, { params }: Params) {
-  const input = requestSchema.parse(await request.json());
-  const body = await patchStep({
-    sessionId: params.sessionId,
-    stepKey: params.stepKey as never,
-    version: input.version,
-    answers: input.answers
+export async function PATCH(request: Request, { params }: Params): Promise<NextResponse> {
+  return withErrorHandler(async () => {
+    const raw = await request.json();
+    const input = requestSchema.parse(raw);
+
+    if (!isStepKey(params.stepKey)) {
+      throw new ApiError("VALIDATION_ERROR", `Unknown assessment step: ${params.stepKey}.`, 400);
+    }
+
+    const body = await patchStep({
+      sessionId: params.sessionId,
+      stepKey: params.stepKey,
+      version: input.version,
+      answers: input.answers
+    });
+    return { body };
   });
-  return NextResponse.json(body);
 }
