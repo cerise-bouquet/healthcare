@@ -1,0 +1,36 @@
+{
+  "name": "healthcare-assessment",
+  "version": "0.1.0",
+  "private": true,
+  "description": "健康测评系统 MVP 起步工程骨架",
+  "scripts": {
+    "mock:dev": "node scripts/local-server.mjs",
+    "dev": "next dev",
+    "typecheck": "tsc --noEmit",
+    "lint": "next lint",
+    "test": "vitest run",
+    "test:integration": "vitest run src/tests/integration",
+    "test:e2e": "playwright test",
+    "contracts:check": "node scripts/check-contracts.mjs"
+  },
+  "dependencies": {
+    "@prisma/client": "^5.22.0",
+    "next": "^14.2.0",
+    "react": "^18.3.0",
+    "react-dom": "^18.3.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.49.0",
+    "@types/node": "^20.17.0",
+    "@types/react": "^18.3.0",
+    "eslint": "^8.57.0",
+    "eslint-config-next": "^14.2.0",
+    "prisma": "^5.22.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

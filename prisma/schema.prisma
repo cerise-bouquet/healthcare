@@ -1,0 +1,141 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum AssessmentStatus {
+  DRAFT
+  READY_TO_SUBMIT
+  SUBMITTED
+  EXPIRED
+}
+
+enum SubscriptionStatus {
+  NONE
+  ACTIVE
+  EXPIRED
+  CANCELED
+}
+
+enum ActivityLevel {
+  SEDENTARY
+  LIGHT
+  MODERATE
+  ACTIVE
+  VERY_ACTIVE
+}
+
+enum Goal {
+  LOSE_WEIGHT
+  MAINTAIN
+  BUILD_MUSCLE
+  IMPROVE_FITNESS
+}
+
+enum Gender {
+  FEMALE
+  MALE
+  OTHER
+}
+
+model User {
+  id             String              @id @default(cuid())
+  sessionId      String              @unique @map("session_id")
+  anonymousId    String?             @unique @map("anonymous_id")
+  createdAt      DateTime            @default(now()) @map("created_at")
+  lastSeenAt     DateTime            @updatedAt @map("last_seen_at")
+  sessions       AssessmentSession[]
+  subscriptions  Subscription[]
+  paymentEvents  PaymentEvent[]
+
+  @@map("users")
+}
+
+model AssessmentSession {
+  id             String             @id @default(cuid())
+  userId         String             @map("user_id")
+  status         AssessmentStatus   @default(DRAFT)
+  currentStep    String             @default("profile") @map("current_step")
+  completedSteps String[]           @default([]) @map("completed_steps")
+  version        Int                @default(1)
+  submittedAt    DateTime?          @map("submitted_at")
+  createdAt      DateTime           @default(now()) @map("created_at")
+  updatedAt      DateTime           @updatedAt @map("updated_at")
+  user           User               @relation(fields: [userId], references: [id])
+  answers        AssessmentAnswer?
+  result         AssessmentResult?
+  paymentEvents  PaymentEvent[]
+
+  @@index([userId])
+  @@map("assessment_sessions")
+}
+
+model AssessmentAnswer {
+  id             String             @id @default(cuid())
+  sessionId      String             @unique @map("session_id")
+  gender         Gender?
+  goal           Goal?
+  age            Int?
+  heightCm       Decimal?           @map("height_cm")
+  weightKg       Decimal?           @map("weight_kg")
+  targetWeightKg Decimal?           @map("target_weight_kg")
+  activityLevel  ActivityLevel?     @map("activity_level")
+  extraAnswers   Json?              @map("extra_answers")
+  createdAt      DateTime           @default(now()) @map("created_at")
+  updatedAt      DateTime           @updatedAt @map("updated_at")
+  session        AssessmentSession  @relation(fields: [sessionId], references: [id])
+
+  @@map("assessment_answers")
+}
+
+model AssessmentResult {
+  id                  String             @id @default(cuid())
+  sessionId           String             @unique @map("session_id")
+  bmi                 Decimal
+  bmiCategory         String             @map("bmi_category")
+  calorieTarget       Int?               @map("calorie_target")
+  predictedTargetDate DateTime?          @map("predicted_target_date")
+  publicPayload       Json               @map("public_payload")
+  protectedPayload    Json               @map("protected_payload")
+  algorithmVersion    String             @map("algorithm_version")
+  createdAt           DateTime           @default(now()) @map("created_at")
+  session             AssessmentSession  @relation(fields: [sessionId], references: [id])
+
+  @@map("assessment_results")
+}
+
+model Subscription {
+  id            String             @id @default(cuid())
+  userId        String             @map("user_id")
+  status        SubscriptionStatus @default(NONE)
+  startsAt      DateTime?          @map("starts_at")
+  expiresAt     DateTime?          @map("expires_at")
+  provider      String             @default("mock")
+  sourceEventId String?            @map("source_event_id")
+  createdAt     DateTime           @default(now()) @map("created_at")
+  updatedAt     DateTime           @updatedAt @map("updated_at")
+  user          User               @relation(fields: [userId], references: [id])
+
+  @@index([userId, status])
+  @@map("subscriptions")
+}
+
+model PaymentEvent {
+  id             String             @id @default(cuid())
+  userId         String             @map("user_id")
+  sessionId      String             @map("session_id")
+  idempotencyKey String             @unique @map("idempotency_key")
+  eventType      String             @default("mock.payment_succeeded") @map("event_type")
+  payload        Json
+  processedAt    DateTime           @default(now()) @map("processed_at")
+  user           User               @relation(fields: [userId], references: [id])
+  session        AssessmentSession  @relation(fields: [sessionId], references: [id])
+
+  @@index([userId])
+  @@index([sessionId])
+  @@map("payment_events")
+}
