@@ -409,7 +409,7 @@ describe("GET /api/results/{sessionId} —— 权限安全测试", () => {
       }]
     });
 
-    const result = await getResultForSession("sess_test_paid");
+    const result = await getResultForSession("sess_test_paid") as import("@/modules/results/service").FullResultDto;
 
     // 会员可看到 fullResult（嵌套受保护字段）
     expect(result).toHaveProperty("fullResult");
