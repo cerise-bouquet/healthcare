@@ -1,4 +1,5 @@
 import "./globals.css";
+import { AuthProvider } from "@/lib/auth-context";
 
 export const metadata = {
   title: "健康测评系统",
@@ -8,7 +9,9 @@ export const metadata = {
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="zh-CN">
-      <body>{children}</body>
+      <body>
+        <AuthProvider>{children}</AuthProvider>
+      </body>
     </html>
   );
 }

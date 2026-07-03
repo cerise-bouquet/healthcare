@@ -215,6 +215,72 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // ---- Auth 路由 ----
+
+  if (req.method === "POST" && url.pathname === "/api/auth/register") {
+    await readBody(req);
+    json(res, {
+      userId: "usr_mock_registered",
+      email: "demo@example.com",
+      token: "tok_mock_register",
+      sessions: []
+    }, 201);
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/auth/login") {
+    await readBody(req);
+    json(res, {
+      userId: "usr_mock_login",
+      email: "demo@example.com",
+      token: "tok_mock_login",
+      sessions: [
+        {
+          sessionId: "demo_session",
+          status: "SUBMITTED",
+          currentStep: "review",
+          submittedAt: new Date().toISOString(),
+          createdAt: new Date(Date.now() - 86400000).toISOString()
+        }
+      ]
+    });
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/auth/history") {
+    json(res, {
+      userId: "usr_mock_user",
+      email: "demo@example.com",
+      sessions: [
+        {
+          sessionId: "demo_session",
+          assessmentId: "as_history_001",
+          status: "SUBMITTED",
+          currentStep: "review",
+          completedSteps: ["profile", "goal", "body", "activity", "review"],
+          version: 6,
+          submittedAt: new Date().toISOString(),
+          createdAt: new Date(Date.now() - 86400000).toISOString(),
+          hasResult: true,
+          resultSummary: { bmi: 24.1, bmiCategory: "NORMAL" }
+        },
+        {
+          sessionId: "demo_session_draft",
+          assessmentId: "as_history_002",
+          status: "DRAFT",
+          currentStep: "body",
+          completedSteps: ["profile", "goal"],
+          version: 3,
+          submittedAt: null,
+          createdAt: new Date(Date.now() - 3600000).toISOString(),
+          hasResult: false,
+          resultSummary: null
+        }
+      ]
+    });
+    return;
+  }
+
   json(res, { code: "SESSION_NOT_FOUND", message: "Mock route not found." }, 404);
 });
 
