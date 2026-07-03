@@ -27,24 +27,22 @@
 
 ## 快速启动
 
-### 本地开发（Mock Server，无需数据库）
-
-```bash
-npm run mock:dev
-```
-
-打开：
-
-```text
-http://localhost:3000
-```
-
-### 标准开发流程（需要 PostgreSQL）
+### 本地开发（无需数据库，内存存储）
 
 ```bash
 npm install
+npm run dev
+```
+
+打开 **http://localhost:3000** 即可体验完整系统。
+
+> 系统自动使用内存数据库，无需安装 PostgreSQL。所有功能完整可用：匿名测评、分步问卷、健康评估、模拟支付、用户注册/登录、测评历史。
+
+### 使用真实 PostgreSQL（可选）
+
+```bash
 cp .env.example .env
-# 编辑 .env 填入 DATABASE_URL
+# 编辑 .env，设置 DATABASE_URL 指向你的 PostgreSQL
 npx prisma migrate dev
 npm run dev
 ```
