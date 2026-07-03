@@ -2,7 +2,9 @@
 
 健康测评系统 —— 匿名 session、分步问卷、健康评估算法、模拟支付和完整报告解锁的 MVP 全栈应用。
 
-**三天构建计划全部完成**：数据库访问层、4 个领域服务、6 个 API 端点、错误处理框架、安全权限控制（allowlist 深度清洗）、四层测试覆盖（单元/集成/权限安全/E2E）、CI 流水线、部署配置与完整文档。
+🌐 **公网演示：https://healthcare-tau-sepia.vercel.app**
+
+**三天构建计划全部完成**：数据库访问层、5 个领域服务、9 个 API 端点、错误处理框架、安全权限控制（allowlist 深度清洗）、四层测试覆盖（单元/集成/权限安全/E2E）、CI 流水线、Vercel 部署与完整文档。
 
 [![CI](https://github.com/cerise-bouquet/healthcare/actions/workflows/ci.yml/badge.svg)](https://github.com/cerise-bouquet/healthcare/actions/workflows/ci.yml)
 
@@ -98,9 +100,15 @@ npm run test:e2e       # E2E 端到端测试（7 个用例）
 模拟支付示例：
 
 ```bash
+# 线上环境
+curl -X POST https://healthcare-tau-sepia.vercel.app/api/pay \
+  -H "Content-Type: application/json" \
+  -d '{"sessionId":"demo_session","idempotencyKey":"demo-pay-001","provider":"mock","plan":"monthly"}'
+
+# 本地环境
 curl -X POST http://localhost:3000/api/pay \
   -H "Content-Type: application/json" \
-  -d '{"sessionId":"demo_paid_session_001","idempotencyKey":"demo-pay-001","provider":"mock","plan":"monthly"}'
+  -d '{"sessionId":"demo_session","idempotencyKey":"demo-pay-001","provider":"mock","plan":"monthly"}'
 ```
 
 ## 核心 API
