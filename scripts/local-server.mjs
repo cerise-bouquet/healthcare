@@ -2,6 +2,11 @@ import http from "node:http";
 
 const port = Number(process.env.PORT || 3000);
 
+// 模拟内存状态：跟踪已支付的 sessionId
+const paidSessions = new Set();
+// 模拟内存存储：sessionId → 答案
+const sessionStore = new Map();
+
 function json(res, body, status = 200) {
   const payload = JSON.stringify(body, null, 2);
   res.writeHead(status, {
@@ -137,15 +142,43 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (req.method === "GET" && /^\/api\/results\/[^/]+$/.test(url.pathname)) {
-    json(res, {
-      subscription: { status: "NONE" },
-      publicResult: {
-        bmi: 24.1,
-        bmiCategory: "NORMAL",
-        summary: "You are close to your target range."
-      },
-      paywall: { required: true }
-    });
+    const sid = url.pathname.split("/")[3];
+    const isPaid = paidSessions.has(sid) || sid === "demo_paid_session_001";
+
+    if (isPaid) {
+      json(res, {
+        subscription: { status: "ACTIVE", expiresAt: "2026-08-01T00:00:00.000Z" },
+        publicResult: {
+          bmi: 24.1,
+          bmiCategory: "NORMAL",
+          summary: "You are close to your target range."
+        },
+        fullResult: {
+          calorieTarget: 1780,
+          predictedTargetDate: "2026-10-15",
+          predictionSeries: [
+            { week: 1, weightKg: 67.4 },
+            { week: 2, weightKg: 66.8 }
+          ],
+          dailyPlan: {
+            activity: "MODERATE",
+            proteinSuggestion: "95-110g/day",
+            notes: ["Keep weekly loss under a conservative threshold."]
+          }
+        },
+        paywall: { required: false }
+      });
+    } else {
+      json(res, {
+        subscription: { status: "NONE" },
+        publicResult: {
+          bmi: 24.1,
+          bmiCategory: "NORMAL",
+          summary: "You are close to your target range."
+        },
+        paywall: { required: true }
+      });
+    }
     return;
   }
 
@@ -165,7 +198,11 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (req.method === "POST" && url.pathname === "/api/pay") {
-    await readBody(req);
+    const body = await readBody(req);
+    // 跟踪已支付的 sessionId（内存状态）
+    if (body.sessionId) {
+      paidSessions.add(body.sessionId);
+    }
     json(res, {
       paid: true,
       subscription: {

@@ -1,0 +1,144 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# 确保同一分支的旧 CI 运行被自动取消
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  typecheck:
+    name: Type Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+      - run: npm ci
+      - run: npx prisma generate
+      - run: npm run typecheck
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+      - run: npm ci
+      - run: npm run lint
+
+  unit-tests:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+      - run: npm ci
+      - run: npx prisma generate
+      - run: npm test
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-results
+          path: test-results/
+
+  integration-tests:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+      - run: npm ci
+      - run: npx prisma generate
+      - run: npm run test:integration
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-test-results
+          path: test-results/
+
+  e2e-tests:
+    name: E2E Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+      - run: npm ci
+      - run: npx prisma generate
+      # 启动 mock server 作为 E2E 测试目标
+      - name: Start mock server
+        run: |
+          node scripts/local-server.mjs &
+          sleep 2
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+      - name: Run E2E tests
+        run: npm run test:e2e
+        env:
+          PLAYWRIGHT_BASE_URL: http://localhost:3000
+      - name: Upload E2E results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-test-results
+          path: |
+            playwright-report/
+            test-results/
+
+  # 汇总检查：所有测试通过才能合并
+  all-checks:
+    name: All Checks Passed
+    if: always()
+    needs: [typecheck, lint, unit-tests, integration-tests, e2e-tests]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify all checks passed
+        run: |
+          echo "Checking results..."
+          RESULT="${{ needs.typecheck.result }}"
+          if [ "$RESULT" != "success" ]; then
+            echo "typecheck: $RESULT"
+            exit 1
+          fi
+          RESULT="${{ needs.lint.result }}"
+          if [ "$RESULT" != "success" ]; then
+            echo "lint: $RESULT"
+            exit 1
+          fi
+          RESULT="${{ needs.unit-tests.result }}"
+          if [ "$RESULT" != "success" ]; then
+            echo "unit-tests: $RESULT"
+            exit 1
+          fi
+          RESULT="${{ needs.integration-tests.result }}"
+          if [ "$RESULT" != "success" ]; then
+            echo "integration-tests: $RESULT"
+            exit 1
+          fi
+          RESULT="${{ needs.e2e-tests.result }}"
+          if [ "$RESULT" != "success" ]; then
+            echo "e2e-tests: $RESULT"
+            exit 1
+          fi
+          echo "All checks passed!"
