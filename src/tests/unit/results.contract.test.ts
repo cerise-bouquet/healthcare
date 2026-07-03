@@ -241,6 +241,7 @@ describe("calculateFullResult", () => {
     expect(result).toHaveProperty("tdee");
     expect(result).toHaveProperty("calorieTarget");
     expect(result).toHaveProperty("calorieDeficit");
+    expect(result).toHaveProperty("predictionSeries");
     expect(result).toHaveProperty("publicPayload");
     expect(result).toHaveProperty("protectedPayload");
     expect(result).toHaveProperty("algorithmVersion");
@@ -261,7 +262,7 @@ describe("calculateFullResult", () => {
     expect(result.protectedPayload).toHaveProperty("bmr");
     expect(result.protectedPayload).toHaveProperty("tdee");
     expect(result.protectedPayload).toHaveProperty("calorieTarget");
-    expect(result.protectedPayload).toHaveProperty("detailedPlan");
+    expect(result.protectedPayload).toHaveProperty("dailyPlan");
   });
 
   it("calculates correct values for weight loss scenario", () => {
@@ -280,6 +281,10 @@ describe("calculateFullResult", () => {
 // ---- 受保护字段集合 ----
 
 describe("PROTECTED_FIELD_NAMES", () => {
+  it("includes fullResult", () => {
+    expect(PROTECTED_FIELD_NAMES.has("fullResult")).toBe(true);
+  });
+
   it("includes protectedPayload", () => {
     expect(PROTECTED_FIELD_NAMES.has("protectedPayload")).toBe(true);
   });

@@ -2,7 +2,7 @@ import { db } from "@/lib/db";
 import { ApiError } from "@/lib/errors";
 import { isStepKey, stepSchemas } from "@/lib/validation";
 import type { PatchStepInput, SubmitAssessmentInput } from "./types";
-import { calculateFullResult } from "@/modules/results/service";
+import { calculateFullResult, validateTargetWeight } from "@/modules/results/service";
 import type { PrismaClient } from "@prisma/client";
 
 // ---- 内部辅助 ----
@@ -33,6 +33,20 @@ async function lookupSession(sessionId: string) {
   const session = user.sessions[0];
   if (!session) {
     throw new ApiError("INTERNAL_ERROR", "User has no assessment session.", 500);
+  }
+
+  // 惰性过期检查：超过 30 天未提交的 session 自动标记为 EXPIRED
+  const EXPIRY_DAYS = 30;
+  if (
+    session.status !== "SUBMITTED" &&
+    session.status !== "EXPIRED" &&
+    (Date.now() - session.createdAt.getTime()) > EXPIRY_DAYS * 86400000
+  ) {
+    await db.assessmentSession.update({
+      where: { id: session.id },
+      data: { status: "EXPIRED" }
+    });
+    session.status = "EXPIRED";
   }
 
   return { user, session };
@@ -134,11 +148,26 @@ export async function getProgress(sessionId: string) {
 
 export async function patchStep(input: PatchStepInput) {
   if (!isStepKey(input.stepKey)) {
-    throw new ApiError("VALIDATION_ERROR", "Unknown assessment step.", 400);
+    throw new ApiError("INVALID_ENUM", `Unknown assessment step: ${input.stepKey}`, 400);
   }
 
-  // Zod 校验答案字段
+  // Zod 校验答案字段（结构校验，不含范围约束）
   const parsed = stepSchemas[input.stepKey].strict().parse(input.answers);
+
+  // 专项范围校验（使用特定错误码，便于前端精确提示）
+  const answers = parsed as Record<string, unknown>;
+  if (typeof answers.age === "number" && (answers.age < 13 || answers.age > 80)) {
+    throw new ApiError("AGE_OUT_OF_RANGE", "年龄需在 13-80 岁之间", 400, { field: "age", value: answers.age });
+  }
+  if (typeof answers.heightCm === "number" && (answers.heightCm < 120 || answers.heightCm > 230)) {
+    throw new ApiError("HEIGHT_OUT_OF_RANGE", "身高需在 120-230 cm 之间", 400, { field: "heightCm", value: answers.heightCm });
+  }
+  if (typeof answers.weightKg === "number" && (answers.weightKg < 35 || answers.weightKg > 250)) {
+    throw new ApiError("WEIGHT_OUT_OF_RANGE", "体重需在 35-250 kg 之间", 400, { field: "weightKg", value: answers.weightKg });
+  }
+  if (typeof answers.targetWeightKg === "number" && (answers.targetWeightKg < 35 || answers.targetWeightKg > 250)) {
+    throw new ApiError("WEIGHT_OUT_OF_RANGE", "目标体重需在 35-250 kg 之间", 400, { field: "targetWeightKg", value: answers.targetWeightKg });
+  }
 
   // 在事务中执行：读取 → 版本校验 → 更新答案 → 推进状态 → 版本号+1
   const result = await db.$transaction(async (tx: Tx) => {
@@ -162,12 +191,35 @@ export async function patchStep(input: PatchStepInput) {
       throw new ApiError("INTERNAL_ERROR", "User has no assessment session.", 500);
     }
 
+    // 惰性过期检查（事务内）
+    const EXPIRY_DAYS = 30;
+    if (
+      session.status !== "SUBMITTED" &&
+      session.status !== "EXPIRED" &&
+      (Date.now() - session.createdAt.getTime()) > EXPIRY_DAYS * 86400000
+    ) {
+      await tx.assessmentSession.update({
+        where: { id: session.id },
+        data: { status: "EXPIRED" }
+      });
+      session.status = "EXPIRED";
+    }
+
     // 版本校验
     if (session.version !== input.version) {
       throw new ApiError(
         "VERSION_CONFLICT",
         `Expected version ${session.version}, got ${input.version}.`,
         409
+      );
+    }
+
+    // 已过期不允许修改
+    if (session.status === "EXPIRED") {
+      throw new ApiError(
+        "SESSION_NOT_FOUND",
+        "This assessment session has expired. Please create a new session.",
+        410
       );
     }
 
@@ -184,7 +236,20 @@ export async function patchStep(input: PatchStepInput) {
     const existingAnswers = session.answers
       ? serializeAnswersForProgress(session.answers)
       : {};
-    const mergedAnswers = { ...existingAnswers, ...parsed };
+    const mergedAnswers: Record<string, unknown> = { ...existingAnswers, ...(parsed as Record<string, unknown>) };
+
+    // goal/body 步骤：若已有当前体重和目标，提前校验目标方向合理性
+    if (
+      typeof mergedAnswers.goal === "string" &&
+      typeof mergedAnswers.weightKg === "number" &&
+      typeof mergedAnswers.targetWeightKg === "number"
+    ) {
+      validateTargetWeight(
+        mergedAnswers.goal as "LOSE_WEIGHT" | "MAINTAIN" | "BUILD_MUSCLE" | "IMPROVE_FITNESS",
+        mergedAnswers.weightKg as number,
+        mergedAnswers.targetWeightKg as number
+      );
+    }
 
     // 更新或创建答案
     const answerData = buildAnswerData(session.id, mergedAnswers);
@@ -258,9 +323,36 @@ export async function submitAssessment(input: SubmitAssessmentInput) {
       throw new ApiError("INTERNAL_ERROR", "User has no assessment session.", 500);
     }
 
-    // 已提交：幂等返回已有结果
-    if (session.status === "SUBMITTED" && session.result) {
-      return buildSubmitResponse(sessionId, session.result, user.sessionId);
+    // 惰性过期检查（事务内）
+    const EXPIRY_DAYS = 30;
+    if (
+      session.status !== "SUBMITTED" &&
+      session.status !== "EXPIRED" &&
+      (Date.now() - session.createdAt.getTime()) > EXPIRY_DAYS * 86400000
+    ) {
+      await tx.assessmentSession.update({
+        where: { id: session.id },
+        data: { status: "EXPIRED" }
+      });
+      session.status = "EXPIRED";
+    }
+
+    // 已过期：不允许提交
+    if (session.status === "EXPIRED") {
+      throw new ApiError(
+        "SESSION_NOT_FOUND",
+        "This assessment session has expired. Please create a new session.",
+        410
+      );
+    }
+
+    // 已提交：返回 ALREADY_SUBMITTED 错误，提示创建新测评
+    if (session.status === "SUBMITTED") {
+      throw new ApiError(
+        "ALREADY_SUBMITTED",
+        "Assessment already submitted. Create a new session to start a new assessment.",
+        409
+      );
     }
 
     // 版本校验

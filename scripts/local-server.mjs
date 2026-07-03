@@ -149,6 +149,21 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (req.method === "PATCH" && /^\/api\/assessments\/[^/]+\/steps\/[^/]+$/.test(url.pathname)) {
+    const segments = url.pathname.split("/");
+    const sessionId = segments[3];
+    const stepKey = segments[5];
+    await readBody(req);
+    json(res, {
+      sessionId,
+      status: "DRAFT",
+      currentStep: stepKey === "profile" ? "goal" : stepKey,
+      completedSteps: stepKey === "profile" ? ["profile"] : ["profile", "goal"],
+      version: 2
+    });
+    return;
+  }
+
   if (req.method === "POST" && url.pathname === "/api/pay") {
     await readBody(req);
     json(res, {

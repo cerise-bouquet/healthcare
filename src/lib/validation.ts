@@ -22,16 +22,16 @@ export const versionSchema = z.number().int().positive();
 export const stepSchemas = {
   profile: z.object({
     gender: genderSchema,
-    age: z.number().int().min(13).max(80)
+    age: z.number().int()
   }),
   goal: z.object({
     goal: goalSchema,
-    targetWeightKg: z.number().min(35).max(250).optional()
+    targetWeightKg: z.number().optional()
   }),
   body: z.object({
-    heightCm: z.number().min(120).max(230),
-    weightKg: z.number().min(35).max(250),
-    targetWeightKg: z.number().min(35).max(250).optional()
+    heightCm: z.number(),
+    weightKg: z.number(),
+    targetWeightKg: z.number().optional()
   }),
   activity: z.object({
     activityLevel: activityLevelSchema

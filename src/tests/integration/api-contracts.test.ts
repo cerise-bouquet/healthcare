@@ -75,7 +75,8 @@ function mockSessionLookup(overrides: Record<string, unknown> = {}) {
       completedSteps: overrides.completedSteps ?? [],
       version: overrides.version ?? 1,
       answers: overrides.answers ?? null,
-      result: overrides.result ?? null
+      result: overrides.result ?? null,
+      createdAt: new Date() // 最近的会话，不会触发过期
     }],
     subscriptions: overrides.subscriptions ?? [],
     paymentEvents: overrides.paymentEvents ?? []
@@ -212,7 +213,7 @@ describe("PATCH /api/assessments/{sessionId}/steps/{stepKey}", () => {
       });
       expect.unreachable("Should have thrown");
     } catch (e) {
-      expect((e as ApiError).code).toBe("VALIDATION_ERROR");
+      expect((e as ApiError).code).toBe("INVALID_ENUM");
     }
   });
 
@@ -273,7 +274,7 @@ describe("POST /api/assessments/{sessionId}/submit", () => {
     }
   });
 
-  it("returns existing result on idempotent replay", async () => {
+  it("rejects ALREADY_SUBMITTED on idempotent replay", async () => {
     const existingResult = {
       id: "res_001",
       bmi: 22.5,
@@ -311,14 +312,17 @@ describe("POST /api/assessments/{sessionId}/submit", () => {
       return fn(txMock);
     });
 
-    const result = await submitAssessment({
-      sessionId: "sess_test_001",
-      version: 6,
-      idempotencyKey: "idem_replay"
-    });
-
-    expect(result.status).toBe("SUBMITTED");
-    expect(result.paywall.required).toBe(true);
+    try {
+      await submitAssessment({
+        sessionId: "sess_test_001",
+        version: 6,
+        idempotencyKey: "idem_replay"
+      });
+      expect.unreachable("Should have thrown ALREADY_SUBMITTED");
+    } catch (e) {
+      expect((e as ApiError).code).toBe("ALREADY_SUBMITTED");
+      expect((e as ApiError).status).toBe(409);
+    }
   });
 });
 
@@ -366,6 +370,7 @@ describe("GET /api/results/{sessionId} —— 权限安全测试", () => {
 
     // 关键安全：非会员 JSON 中不得出现受保护字段名
     const json = JSON.stringify(result);
+    expect(json).not.toContain("fullResult");
     expect(json).not.toContain("protectedPayload");
     expect(json).not.toContain("calorieTarget");
     expect(json).not.toContain("calorieDeficit");
@@ -390,7 +395,11 @@ describe("GET /api/results/{sessionId} —— 权限安全测试", () => {
           bmi: 24.1,
           bmiCategory: "NORMAL",
           publicPayload,
-          protectedPayload
+          protectedPayload: {
+            ...protectedPayload,
+            predictionSeries: [],
+            dailyPlan: { activity: "MODERATE", proteinSuggestion: "80-100g/day" }
+          }
         }
       }],
       subscriptions: [{
@@ -402,13 +411,14 @@ describe("GET /api/results/{sessionId} —— 权限安全测试", () => {
 
     const result = await getResultForSession("sess_test_paid");
 
-    // 会员可看到受保护字段
-    expect(result).toHaveProperty("protectedPayload");
-    expect(result).toHaveProperty("calorieTarget");
-    expect(result).toHaveProperty("calorieDeficit");
-    expect(result).toHaveProperty("predictedTargetDate");
-    expect(result).toHaveProperty("dailyPlan");
+    // 会员可看到 fullResult（嵌套受保护字段）
+    expect(result).toHaveProperty("fullResult");
+    expect(result.fullResult).toHaveProperty("calorieTarget");
+    expect(result.fullResult).toHaveProperty("predictedTargetDate");
+    expect(result.fullResult).toHaveProperty("predictionSeries");
+    expect(result.fullResult).toHaveProperty("dailyPlan");
     expect(result.paywall).toEqual({ required: false });
+    expect(result.subscription).toHaveProperty("expiresAt");
   });
 
   it("过期订阅视为非会员", async () => {
@@ -443,6 +453,7 @@ describe("GET /api/results/{sessionId} —— 权限安全测试", () => {
 
     // 不应包含受保护字段
     const json = JSON.stringify(result);
+    expect(json).not.toContain("fullResult");
     expect(json).not.toContain("protectedPayload");
     expect(json).not.toContain("calorieTarget");
   });

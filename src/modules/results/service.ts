@@ -24,6 +24,7 @@ export interface FullResult {
   calorieDeficit: number | null;
   predictedTargetDate: string | null;
   weightChangePerWeek: number | null;
+  predictionSeries: Array<{ week: number; weightKg: number }>;
   publicPayload: Record<string, unknown>;
   protectedPayload: Record<string, unknown>;
   algorithmVersion: string;
@@ -37,13 +38,13 @@ export interface PublicResultDto {
 }
 
 export interface FullResultDto extends PublicResultDto {
-  publicResult: Record<string, unknown>;
-  protectedPayload?: Record<string, unknown>;
-  predictionSeries?: unknown[];
-  dailyPlan?: unknown;
-  calorieDeficit?: number;
-  calorieTarget?: number;
-  predictedTargetDate?: string;
+  subscription: { status: string; expiresAt?: string };
+  fullResult: {
+    calorieTarget?: number | null;
+    predictedTargetDate?: string | null;
+    predictionSeries: Array<{ week: number; weightKg: number }>;
+    dailyPlan?: unknown;
+  };
 }
 
 // ---- 常量 ----
@@ -257,6 +258,13 @@ export function calculateFullResult(answers: Record<string, unknown>): FullResul
       "Unlock full plan to view target date and detailed daily guidance."
   };
 
+  // 生成周预测序列
+  const predictionSeries = generatePredictionSeries(
+    weightKg,
+    targetWeightKg ?? weightKg,
+    weeklyChange ?? 0
+  );
+
   // 构建受保护载荷
   const protectedPayload: Record<string, unknown> = {
     bmr,
@@ -265,7 +273,8 @@ export function calculateFullResult(answers: Record<string, unknown>): FullResul
     calorieDeficit,
     predictedTargetDate: predictedDate,
     weightChangePerWeek: weeklyChange,
-    detailedPlan: generateDailyPlan(calorieTarget ?? tdee, goal, activityLevel)
+    predictionSeries,
+    dailyPlan: generateDailyPlan(calorieTarget ?? tdee, goal, activityLevel)
   };
 
   return {
@@ -277,10 +286,37 @@ export function calculateFullResult(answers: Record<string, unknown>): FullResul
     calorieDeficit,
     predictedTargetDate: predictedDate,
     weightChangePerWeek: weeklyChange,
+    predictionSeries,
     publicPayload,
     protectedPayload,
     algorithmVersion: ALGORITHM_VERSION
   };
+}
+
+/** 生成周预测序列（付费内容） */
+function generatePredictionSeries(
+  currentWeight: number,
+  targetWeight: number,
+  weeklyChange: number
+): Array<{ week: number; weightKg: number }> {
+  if (weeklyChange === 0) return [];
+  const series: Array<{ week: number; weightKg: number }> = [];
+  let w = currentWeight;
+  let week = 0;
+  const maxWeeks = 52;
+  while (Math.abs(w - targetWeight) > 0.1 && week < maxWeeks) {
+    w += weeklyChange;
+    week++;
+    // 确保不会越过目标体重
+    if (
+      (weeklyChange < 0 && w < targetWeight) ||
+      (weeklyChange > 0 && w > targetWeight)
+    ) {
+      w = targetWeight;
+    }
+    series.push({ week, weightKg: Math.round(w * 10) / 10 });
+  }
+  return series;
 }
 
 /** 公开摘要文案 */
@@ -298,10 +334,12 @@ function generateSummary(bmiCategory: string, _goal: Goal): string {
 function generateDailyPlan(
   calorieTarget: number,
   _goal: Goal,
-  _activityLevel: ActivityLevel
+  activityLevel: ActivityLevel
 ): Record<string, unknown> {
   return {
     calorieTarget,
+    activity: activityLevel,
+    proteinSuggestion: `${Math.round(calorieTarget * 0.2 / 4)}-${Math.round(calorieTarget * 0.25 / 4)}g/day`,
     meals: {
       breakfast: Math.round(calorieTarget * 0.3),
       lunch: Math.round(calorieTarget * 0.35),
@@ -311,7 +349,10 @@ function generateDailyPlan(
     protein: `${Math.round(calorieTarget * 0.2 / 4)}g`,
     carbs: `${Math.round(calorieTarget * 0.5 / 4)}g`,
     fat: `${Math.round(calorieTarget * 0.3 / 9)}g`,
-    note: "以上配比为一般性建议，具体需求请咨询营养师。"
+    notes: [
+      "Keep weekly loss under a conservative threshold.",
+      "以上配比为一般性建议，具体需求请咨询营养师。"
+    ]
   };
 }
 
@@ -319,6 +360,7 @@ function generateDailyPlan(
 
 /** 只有付费会员才能看到的字段名集合 */
 const PROTECTED_FIELD_NAMES = new Set([
+  "fullResult",
   "protectedPayload",
   "predictionSeries",
   "dailyPlan",
@@ -363,6 +405,17 @@ export async function getResultForSession(sessionId: string): Promise<PublicResu
     subscription?.status === "ACTIVE" &&
     (!subscription.expiresAt || subscription.expiresAt > new Date());
 
+  // 付费门槛守卫：非会员尝试访问受保护数据时返回 403
+  function requireActiveSubscription(): void {
+    if (!isSubscribed) {
+      throw new ApiError(
+        "RESULT_LOCKED",
+        "Full result requires an active subscription. Please complete payment to unlock.",
+        403
+      );
+    }
+  }
+
   const result = session.result;
   const pub = result.publicPayload as Record<string, unknown>;
   const prot = result.protectedPayload as Record<string, unknown>;
@@ -388,17 +441,20 @@ export async function getResultForSession(sessionId: string): Promise<PublicResu
 
   // 付费会员：展开完整结果
   if (isSubscribed) {
+    requireActiveSubscription();
+
     return {
       ...baseResponse,
-      publicResult: {
-        ...baseResponse.publicResult,
-        // 公开结果中不合并受保护字段
+      subscription: {
+        status: subscription!.status,
+        expiresAt: subscription!.expiresAt?.toISOString()
       },
-      protectedPayload: prot,
-      calorieDeficit: prot.calorieDeficit as number | undefined,
-      calorieTarget: prot.calorieTarget as number | undefined,
-      predictedTargetDate: prot.predictedTargetDate as string | undefined,
-      dailyPlan: prot.detailedPlan
+      fullResult: {
+        calorieTarget: prot.calorieTarget as number | null | undefined,
+        predictedTargetDate: prot.predictedTargetDate as string | null | undefined,
+        predictionSeries: (prot.predictionSeries as Array<{ week: number; weightKg: number }>) ?? [],
+        dailyPlan: prot.dailyPlan as Record<string, unknown> | undefined
+      }
     };
   }
 
